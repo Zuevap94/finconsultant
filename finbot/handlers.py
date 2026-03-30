@@ -109,6 +109,7 @@ FINANCE_KEYWORDS = (
 )
 
 USER_INPUT_FILTER = (filters.TEXT | filters.VOICE) & ~filters.COMMAND
+CUSTOM_INPUT_LABEL = "Ввести свое"
 
 
 def _message(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
@@ -146,6 +147,56 @@ def _yes_no_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def _quick_amount_keyboard(*amounts: str) -> ReplyKeyboardMarkup:
+    row1 = [KeyboardButton(value) for value in amounts[:2]]
+    row2 = [KeyboardButton(value) for value in amounts[2:4]] if len(amounts) > 2 else []
+    keyboard = [row1]
+    if row2:
+        keyboard.append(row2)
+    keyboard.append([KeyboardButton(CUSTOM_INPUT_LABEL)])
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _age_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("25"), KeyboardButton("35"), KeyboardButton("45"), KeyboardButton("55")], [KeyboardButton(CUSTOM_INPUT_LABEL)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _dependents_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("0"), KeyboardButton("1"), KeyboardButton("2"), KeyboardButton("3+")], [KeyboardButton(CUSTOM_INPUT_LABEL)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _goal_horizon_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("1"), KeyboardButton("3"), KeyboardButton("5"), KeyboardButton("10"), KeyboardButton("20")], [KeyboardButton(CUSTOM_INPUT_LABEL)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _goal_name_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("Финансовая подушка"), KeyboardButton("Покупка жилья")],
+            [KeyboardButton("Пенсия"), KeyboardButton("Образование детей")],
+            [KeyboardButton(CUSTOM_INPUT_LABEL)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
 def _is_finance_related(text: str) -> bool:
     lowered = text.lower()
     return any(keyword in lowered for keyword in FINANCE_KEYWORDS)
@@ -173,6 +224,10 @@ def _normalize_priority(text: str) -> Optional[str]:
     if lowered.startswith("низ"):
         return "низкий"
     return None
+
+
+def _is_custom_input(text: str) -> bool:
+    return text.strip().lower() == CUSTOM_INPUT_LABEL.lower()
 
 
 async def _extract_user_text(
@@ -238,7 +293,10 @@ def _build_llm_personalization(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     context.user_data["goals"] = []
-    await update.message.reply_text(_message(context, "start_welcome"))
+    await update.message.reply_text(
+        _message(context, "start_welcome"),
+        reply_markup=_age_keyboard(),
+    )
     return AGE
 
 
@@ -322,10 +380,19 @@ async def age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     text = await _extract_user_text(update, context, "age")
     if text is None:
         return AGE
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите возраст числом от 18 до 100.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return AGE
     try:
         age = parse_positive_int(text, min_value=18, max_value=100)
     except Exception:
-        await update.message.reply_text("Введите возраст числом от 18 до 100.")
+        await update.message.reply_text(
+            "Введите возраст числом от 18 до 100.",
+            reply_markup=_age_keyboard(),
+        )
         return AGE
     context.user_data["age"] = age
     await update.message.reply_text(
@@ -351,13 +418,25 @@ async def dependents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = await _extract_user_text(update, context, "dependents")
     if text is None:
         return DEPENDENTS
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите количество иждивенцев числом (можно 0).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return DEPENDENTS
     try:
         dependents = parse_positive_int(text, min_value=0, max_value=20)
     except Exception:
-        await update.message.reply_text("Введите число от 0 до 20.")
+        await update.message.reply_text(
+            "Введите число от 0 до 20.",
+            reply_markup=_dependents_keyboard(),
+        )
         return DEPENDENTS
     context.user_data["dependents"] = dependents
-    await update.message.reply_text("Ваш средний доход в месяц (в ₽)? Например: 120000")
+    await update.message.reply_text(
+        "Ваш средний доход в месяц (в ₽)? Выберите вариант или введите свое значение.",
+        reply_markup=_quick_amount_keyboard("80 000 ₽", "120 000 ₽", "180 000 ₽", "250 000 ₽"),
+    )
     return MONTHLY_INCOME
 
 
@@ -365,12 +444,24 @@ async def income_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = await _extract_user_text(update, context, "monthly_income")
     if text is None:
         return MONTHLY_INCOME
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму дохода, например: 120000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return MONTHLY_INCOME
     value = _validate_money_step(text)
     if value is None or value <= 0:
-        await update.message.reply_text("Введите корректную сумму дохода больше 0.")
+        await update.message.reply_text(
+            "Введите корректную сумму дохода больше 0.",
+            reply_markup=_quick_amount_keyboard("80 000 ₽", "120 000 ₽", "180 000 ₽", "250 000 ₽"),
+        )
         return MONTHLY_INCOME
     context.user_data["monthly_income"] = value
-    await update.message.reply_text("Основные расходы в месяц (в ₽)? Например: 70000")
+    await update.message.reply_text(
+        "Основные расходы в месяц (в ₽)? Выберите вариант или введите свое значение.",
+        reply_markup=_quick_amount_keyboard("40 000 ₽", "70 000 ₽", "100 000 ₽", "140 000 ₽"),
+    )
     return MONTHLY_EXPENSES
 
 
@@ -378,12 +469,24 @@ async def expenses_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = await _extract_user_text(update, context, "monthly_expenses")
     if text is None:
         return MONTHLY_EXPENSES
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму расходов, например: 70000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return MONTHLY_EXPENSES
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму расходов.")
+        await update.message.reply_text(
+            "Введите корректную сумму расходов.",
+            reply_markup=_quick_amount_keyboard("40 000 ₽", "70 000 ₽", "100 000 ₽", "140 000 ₽"),
+        )
         return MONTHLY_EXPENSES
     context.user_data["monthly_expenses"] = value
-    await update.message.reply_text("Текущие сбережения (в ₽)?")
+    await update.message.reply_text(
+        "Текущие сбережения (в ₽)?",
+        reply_markup=_quick_amount_keyboard("0 ₽", "100 000 ₽", "300 000 ₽", "1 000 000 ₽"),
+    )
     return CURRENT_SAVINGS
 
 
@@ -391,12 +494,24 @@ async def current_savings_handler(update: Update, context: ContextTypes.DEFAULT_
     text = await _extract_user_text(update, context, "current_savings")
     if text is None:
         return CURRENT_SAVINGS
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму сбережений, например: 300000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return CURRENT_SAVINGS
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму сбережений.")
+        await update.message.reply_text(
+            "Введите корректную сумму сбережений.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "100 000 ₽", "300 000 ₽", "1 000 000 ₽"),
+        )
         return CURRENT_SAVINGS
     context.user_data["current_savings"] = value
-    await update.message.reply_text("Стоимость вашей недвижимости (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Стоимость вашей недвижимости (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "3 000 000 ₽", "6 000 000 ₽", "10 000 000 ₽"),
+    )
     return ASSET_REAL_ESTATE
 
 
@@ -404,12 +519,24 @@ async def asset_real_estate_handler(update: Update, context: ContextTypes.DEFAUL
     text = await _extract_user_text(update, context, "assets_real_estate")
     if text is None:
         return ASSET_REAL_ESTATE
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите стоимость недвижимости, например: 6000000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASSET_REAL_ESTATE
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму недвижимости.")
+        await update.message.reply_text(
+            "Введите корректную сумму недвижимости.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "3 000 000 ₽", "6 000 000 ₽", "10 000 000 ₽"),
+        )
         return ASSET_REAL_ESTATE
     context.user_data["assets_real_estate"] = value
-    await update.message.reply_text("Стоимость автомобилей (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Стоимость автомобилей (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "500 000 ₽", "1 000 000 ₽", "2 000 000 ₽"),
+    )
     return ASSET_CARS
 
 
@@ -417,12 +544,24 @@ async def asset_cars_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = await _extract_user_text(update, context, "assets_cars")
     if text is None:
         return ASSET_CARS
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите стоимость автомобилей, например: 1000000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASSET_CARS
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму по автомобилям.")
+        await update.message.reply_text(
+            "Введите корректную сумму по автомобилям.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "500 000 ₽", "1 000 000 ₽", "2 000 000 ₽"),
+        )
         return ASSET_CARS
     context.user_data["assets_cars"] = value
-    await update.message.reply_text("Стоимость ценных бумаг (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Стоимость ценных бумаг (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "200 000 ₽", "500 000 ₽", "1 500 000 ₽"),
+    )
     return ASSET_SECURITIES
 
 
@@ -430,12 +569,24 @@ async def asset_securities_handler(update: Update, context: ContextTypes.DEFAULT
     text = await _extract_user_text(update, context, "assets_securities")
     if text is None:
         return ASSET_SECURITIES
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите стоимость ценных бумаг, например: 500000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASSET_SECURITIES
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму по ценным бумагам.")
+        await update.message.reply_text(
+            "Введите корректную сумму по ценным бумагам.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "200 000 ₽", "500 000 ₽", "1 500 000 ₽"),
+        )
         return ASSET_SECURITIES
     context.user_data["assets_securities"] = value
-    await update.message.reply_text("Стоимость криптовалют (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Стоимость криптовалют (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "50 000 ₽", "150 000 ₽", "500 000 ₽"),
+    )
     return ASSET_CRYPTO
 
 
@@ -443,12 +594,24 @@ async def asset_crypto_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     text = await _extract_user_text(update, context, "assets_crypto")
     if text is None:
         return ASSET_CRYPTO
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите стоимость криптовалют, например: 150000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ASSET_CRYPTO
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму по криптовалютам.")
+        await update.message.reply_text(
+            "Введите корректную сумму по криптовалютам.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "50 000 ₽", "150 000 ₽", "500 000 ₽"),
+        )
         return ASSET_CRYPTO
     context.user_data["assets_crypto"] = value
-    await update.message.reply_text("Остаток по ипотеке (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Остаток по ипотеке (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "1 500 000 ₽", "3 000 000 ₽", "5 000 000 ₽"),
+    )
     return DEBT_MORTGAGE
 
 
@@ -456,12 +619,24 @@ async def debt_mortgage_handler(update: Update, context: ContextTypes.DEFAULT_TY
     text = await _extract_user_text(update, context, "debt_mortgage")
     if text is None:
         return DEBT_MORTGAGE
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите остаток по ипотеке, например: 3000000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return DEBT_MORTGAGE
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму ипотеки.")
+        await update.message.reply_text(
+            "Введите корректную сумму ипотеки.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "1 500 000 ₽", "3 000 000 ₽", "5 000 000 ₽"),
+        )
         return DEBT_MORTGAGE
     context.user_data["debt_mortgage"] = value
-    await update.message.reply_text("Потребительские кредиты (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Потребительские кредиты (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "100 000 ₽", "300 000 ₽", "700 000 ₽"),
+    )
     return DEBT_CONSUMER
 
 
@@ -469,12 +644,24 @@ async def debt_consumer_handler(update: Update, context: ContextTypes.DEFAULT_TY
     text = await _extract_user_text(update, context, "debt_consumer")
     if text is None:
         return DEBT_CONSUMER
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму потребительских кредитов, например: 300000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return DEBT_CONSUMER
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму потребительских кредитов.")
+        await update.message.reply_text(
+            "Введите корректную сумму потребительских кредитов.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "100 000 ₽", "300 000 ₽", "700 000 ₽"),
+        )
         return DEBT_CONSUMER
     context.user_data["debt_consumer"] = value
-    await update.message.reply_text("Прочие долги (в ₽, если нет — 0).")
+    await update.message.reply_text(
+        "Прочие долги (в ₽, если нет — 0).",
+        reply_markup=_quick_amount_keyboard("0 ₽", "50 000 ₽", "150 000 ₽", "400 000 ₽"),
+    )
     return DEBT_OTHER
 
 
@@ -482,9 +669,18 @@ async def debt_other_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = await _extract_user_text(update, context, "debt_other")
     if text is None:
         return DEBT_OTHER
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму прочих долгов, например: 150000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return DEBT_OTHER
     value = _validate_money_step(text)
     if value is None:
-        await update.message.reply_text("Введите корректную сумму прочих долгов.")
+        await update.message.reply_text(
+            "Введите корректную сумму прочих долгов.",
+            reply_markup=_quick_amount_keyboard("0 ₽", "50 000 ₽", "150 000 ₽", "400 000 ₽"),
+        )
         return DEBT_OTHER
     context.user_data["debt_other"] = value
     context.user_data["goals"] = []
@@ -492,7 +688,7 @@ async def debt_other_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Теперь финансовые цели.\n"
         f"Введите первую цель (например: {_message(context, 'goal_examples')}).\n"
         "Можно голосом.",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=_goal_name_keyboard(),
     )
     return GOAL_NAME
 
@@ -501,12 +697,24 @@ async def goal_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = await _extract_user_text(update, context, "goal_name")
     if text is None:
         return GOAL_NAME
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите название цели в свободной форме.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return GOAL_NAME
     name = text.strip()
     if len(name) < 2:
-        await update.message.reply_text("Название цели слишком короткое. Введите чуть подробнее.")
+        await update.message.reply_text(
+            "Название цели слишком короткое. Введите чуть подробнее.",
+            reply_markup=_goal_name_keyboard(),
+        )
         return GOAL_NAME
     context.user_data["current_goal_name"] = name
-    await update.message.reply_text("Какую сумму хотите накопить для этой цели (в ₽)?")
+    await update.message.reply_text(
+        "Какую сумму хотите накопить для этой цели (в ₽)?",
+        reply_markup=_quick_amount_keyboard("300 000 ₽", "1 000 000 ₽", "3 000 000 ₽", "10 000 000 ₽"),
+    )
     return GOAL_TARGET
 
 
@@ -514,12 +722,24 @@ async def goal_target_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = await _extract_user_text(update, context, "goal_target")
     if text is None:
         return GOAL_TARGET
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите сумму цели в рублях, например: 3000000",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return GOAL_TARGET
     value = _validate_money_step(text)
     if value is None or value == 0:
-        await update.message.reply_text("Введите корректную сумму больше 0.")
+        await update.message.reply_text(
+            "Введите корректную сумму больше 0.",
+            reply_markup=_quick_amount_keyboard("300 000 ₽", "1 000 000 ₽", "3 000 000 ₽", "10 000 000 ₽"),
+        )
         return GOAL_TARGET
     context.user_data["current_goal_target"] = value
-    await update.message.reply_text("За сколько лет хотите достичь цели? (1-50)")
+    await update.message.reply_text(
+        "За сколько лет хотите достичь цели? (1-50)",
+        reply_markup=_goal_horizon_keyboard(),
+    )
     return GOAL_HORIZON
 
 
@@ -527,10 +747,19 @@ async def goal_horizon_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     text = await _extract_user_text(update, context, "goal_horizon")
     if text is None:
         return GOAL_HORIZON
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Введите горизонт цели числом (от 1 до 50 лет).",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return GOAL_HORIZON
     try:
         horizon = parse_positive_int(text, min_value=1, max_value=50)
     except Exception:
-        await update.message.reply_text("Введите число от 1 до 50.")
+        await update.message.reply_text(
+            "Введите число от 1 до 50.",
+            reply_markup=_goal_horizon_keyboard(),
+        )
         return GOAL_HORIZON
     context.user_data["current_goal_horizon"] = horizon
     await update.message.reply_text(
@@ -573,7 +802,7 @@ async def goal_add_more_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if decision is True:
         await update.message.reply_text(
             "Введите название следующей цели.",
-            reply_markup=ReplyKeyboardRemove(),
+            reply_markup=_goal_name_keyboard(),
         )
         return GOAL_NAME
     if decision is None:
