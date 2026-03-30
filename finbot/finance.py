@@ -26,6 +26,15 @@ class AnalysisResult:
     monthly_free_cashflow: float
 
 
+@dataclass
+class PlanPayload:
+    goals: List[Goal]
+    analysis: AnalysisResult
+    allocation: Dict[str, float]
+    budget_hints: List[str]
+    strategies: List[Tuple[str, str]]
+
+
 def parse_goals(goals_json: str) -> List[Goal]:
     try:
         data = json.loads(goals_json)
@@ -207,15 +216,37 @@ def _format_money(value: float) -> str:
     return f"{value:,.0f} ₽".replace(",", " ")
 
 
-def build_plan_message(profile: UserFinancialProfile) -> str:
+def build_plan_payload(profile: UserFinancialProfile) -> PlanPayload:
     goals = parse_goals(profile.goals_json)
     analysis = analyze_profile(profile)
     allocation = calculate_asset_allocation(profile, goals)
     budget_hints = build_budget_hints(profile, analysis)
     strategies = goal_strategy(goals, analysis.monthly_free_cashflow)
+    return PlanPayload(
+        goals=goals,
+        analysis=analysis,
+        allocation=allocation,
+        budget_hints=budget_hints,
+        strategies=strategies,
+    )
+
+
+def build_plan_message(
+    profile: UserFinancialProfile,
+    risk_reason: str = "",
+    human_recommendations: List[str] | None = None,
+    fund_recommendations: List[str] | None = None,
+) -> str:
+    payload = build_plan_payload(profile)
+    goals = payload.goals
+    analysis = payload.analysis
+    allocation = payload.allocation
+    budget_hints = payload.budget_hints
+    strategies = payload.strategies
 
     lines: List[str] = []
     lines.append("📊 <b>Ваш персональный финансовый план</b>")
+    lines.append("Вы уже сделали важный шаг — разобрались с цифрами и взяли финансы под контроль. Это круто.")
     lines.append("")
     lines.append("<b>1) Текущая финансовая картина</b>")
     lines.append(f"• Доход: {_format_money(profile.monthly_income)}/мес")
@@ -227,6 +258,9 @@ def build_plan_message(profile: UserFinancialProfile) -> str:
     lines.append(f"• Чистый капитал: {_format_money(analysis.net_worth)}")
     lines.append(f"• Коэффициент сбережения: {analysis.savings_ratio * 100:.1f}%")
     lines.append(f"• Соотношение долга к доходу: {analysis.debt_to_income_ratio * 100:.1f}%")
+    lines.append(f"• Автоопределенный риск-профиль: <b>{html.escape(profile.risk_profile.title())}</b>")
+    if risk_reason:
+        lines.append(f"• Почему так: {html.escape(risk_reason)}")
     lines.append(
         f"• Резервный фонд: цель {_format_money(analysis.emergency_fund_target)}, "
         f"дефицит {_format_money(analysis.emergency_fund_gap)}"
@@ -236,20 +270,39 @@ def build_plan_message(profile: UserFinancialProfile) -> str:
     for hint in budget_hints:
         lines.append(f"• {hint}")
     lines.append("")
-    lines.append("<b>3) Пошаговый план накоплений</b>")
+    if human_recommendations:
+        lines.append("<b>3) Живые персональные рекомендации</b>")
+        for item in human_recommendations:
+            if item.strip():
+                lines.append(f"• {html.escape(item)}")
+        lines.append("")
+    else:
+        lines.append("<b>3) Живые персональные рекомендации</b>")
+        lines.append("• Двигайтесь маленькими шагами: финансовая дисциплина почти всегда важнее идеального портфеля.")
+        lines.append("• Сделайте один автоперевод на накопления уже сегодня — даже небольшая сумма меняет траекторию.")
+        lines.append("")
+
+    lines.append("<b>4) Пошаговый план накоплений</b>")
     lines.append("• Шаг 1: Сформируйте/доведите резервный фонд до целевого уровня.")
     lines.append("• Шаг 2: Погасите дорогие кредиты (если ставка выше доходности инвестиций).")
     lines.append("• Шаг 3: Настройте автоматическое инвестирование в день зарплаты.")
     lines.append("• Шаг 4: Пересматривайте план каждые 3-6 месяцев.")
     lines.append("")
-    lines.append("<b>4) Распределение активов (ориентир)</b>")
+    if fund_recommendations:
+        lines.append("<b>5) Идеи по фондам и портфелю (образовательный блок)</b>")
+        for item in fund_recommendations:
+            if item.strip():
+                lines.append(f"• {html.escape(item)}")
+        lines.append("")
+
+    lines.append("<b>6) Распределение активов (ориентир)</b>")
     lines.append("<pre>Класс активов              Доля")
     lines.append("--------------------------------")
     for asset_class, pct in allocation.items():
         lines.append(f"{asset_class:<25} {pct:>4.1f}%")
     lines.append("</pre>")
     lines.append("")
-    lines.append("<b>5) Временная шкала целей</b>")
+    lines.append("<b>7) Временная шкала целей</b>")
     for goal_name, summary in strategies:
         lines.append(f"• <b>{html.escape(goal_name)}</b>: {html.escape(summary)}")
     lines.append("")

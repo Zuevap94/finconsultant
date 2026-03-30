@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
@@ -17,7 +19,16 @@ from telegram.ext import (
     filters,
 )
 
-from finbot.finance import DISCLAIMER, build_plan_message
+from finbot.ai import (
+    AISettings,
+    generate_coach_reply,
+    generate_human_recommendations,
+    infer_risk_profile_with_reason,
+    suggest_funds_and_portfolio,
+    transcribe_voice_note,
+)
+from finbot.finance import DISCLAIMER, build_plan_message, build_plan_payload
+from finbot.pdf_report import build_pdf_report
 from finbot.storage import UserStorage
 from finbot.validators import parse_non_negative_money, parse_positive_int
 
@@ -30,32 +41,33 @@ ALLOWED_GOAL_HINTS = (
 DEFAULT_MESSAGES = {
     "disclaimer": DISCLAIMER,
     "start_welcome": (
-        "Привет! Я помогу собрать данные и подготовить личный финансовый план.\n"
-        "Начнем с возраста. Введите число (например, 30)."
+        "Привет! Я ваш финансовый помощник 👋\n"
+        "Я общаюсь простым языком, понимаю голосовые и соберу для вас персональный план.\n\n"
+        "Начнем с возраста. Напишите или наговорите число (например, 30)."
     ),
     "help_text": (
         "Команды:\n"
         "/start — начать сбор данных\n"
-        "/plan — показать план по сохраненным данным\n"
+        "/plan — показать персональный план\n"
+        "/pdf — скачать детальный PDF-отчет с графиками\n"
         "/reset — удалить сохраненные данные\n"
         "/help — справка\n\n"
+        "Можно отправлять и голосовые сообщения — я постараюсь распознать их.\n"
         "Я отвечаю только на темы финансового планирования. {disclaimer}"
     ),
-    "reset_done": "Ваши данные очищены. Для нового расчета используйте /start.",
-    "plan_no_data": "Пока нет сохраненных данных. Нажмите /start, чтобы пройти короткий опрос.",
+    "reset_done": "Готово, данные очищены. Для нового расчета нажмите /start.",
+    "plan_no_data": "Пока нет сохраненных данных. Нажмите /start, и я быстро проведу вас по вопросам.",
     "unrelated_refusal": (
         "Я специализируюсь только на финансовом планировании. "
-        "Давайте вернемся к личному финансовому плану: используйте /start или /plan."
+        "Давайте вернемся к вашему плану: используйте /start или /plan."
     ),
     "finance_redirect": (
-        "Я лучше всего помогаю через структурированный опрос. "
-        "Нажмите /start для нового плана или /plan для уже сохраненных данных."
+        "Отличный вопрос по финансам. Могу ответить коротко или собрать полный персональный план через /start."
     ),
-    "error_message": "Упс, произошла техническая ошибка. Попробуйте еще раз или используйте /start.",
+    "error_message": "Поймал техническую ошибку. Попробуйте еще раз или используйте /start.",
     "goal_examples": ALLOWED_GOAL_HINTS,
 }
 
-# Conversation states
 (
     AGE,
     FAMILY_STATUS,
@@ -70,13 +82,12 @@ DEFAULT_MESSAGES = {
     DEBT_MORTGAGE,
     DEBT_CONSUMER,
     DEBT_OTHER,
-    RISK_PROFILE,
     GOAL_NAME,
     GOAL_TARGET,
     GOAL_HORIZON,
     GOAL_PRIORITY,
     GOAL_ADD_MORE,
-) = range(19)
+) = range(18)
 
 FINANCE_KEYWORDS = (
     "бюджет",
@@ -91,7 +102,13 @@ FINANCE_KEYWORDS = (
     "долг",
     "пенси",
     "подушка",
+    "портфель",
+    "фонд",
+    "облигац",
+    "акци",
 )
+
+USER_INPUT_FILTER = (filters.TEXT | filters.VOICE) & ~filters.COMMAND
 
 
 def _message(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
@@ -104,15 +121,10 @@ def _message(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
 
 def _family_status_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[KeyboardButton("Холост/Не замужем"), KeyboardButton("Женат/Замужем")], [KeyboardButton("В разводе"), KeyboardButton("Другое")]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
-def _risk_profile_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("Консервативный"), KeyboardButton("Умеренный"), KeyboardButton("Агрессивный")]],
+        [
+            [KeyboardButton("Холост/Не замужем"), KeyboardButton("Женат/Замужем")],
+            [KeyboardButton("В разводе"), KeyboardButton("Другое")],
+        ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
@@ -134,22 +146,96 @@ def _yes_no_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _sanitize_risk(value: str) -> str:
-    mapping = {
-        "консервативный": "консервативный",
-        "умеренный": "умеренный",
-        "агрессивный": "агрессивный",
-    }
-    return mapping.get(value.strip().lower(), "умеренный")
-
-
 def _is_finance_related(text: str) -> bool:
     lowered = text.lower()
     return any(keyword in lowered for keyword in FINANCE_KEYWORDS)
 
 
+def _get_ai_settings(context: ContextTypes.DEFAULT_TYPE) -> Optional[AISettings]:
+    return context.application.bot_data.get("ai_settings")
+
+
+def _normalize_yes_no(text: str) -> Optional[bool]:
+    lowered = text.lower().strip()
+    if lowered.startswith("да"):
+        return True
+    if lowered.startswith("нет"):
+        return False
+    return None
+
+
+def _normalize_priority(text: str) -> Optional[str]:
+    lowered = text.lower().strip()
+    if lowered.startswith("выс"):
+        return "высокий"
+    if lowered.startswith("сре"):
+        return "средний"
+    if lowered.startswith("низ"):
+        return "низкий"
+    return None
+
+
+async def _extract_user_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    state_hint: str = "",
+) -> Optional[str]:
+    message = update.effective_message
+    if message is None:
+        return None
+    if message.text:
+        return message.text.strip()
+
+    if message.voice:
+        ai_settings = _get_ai_settings(context)
+        if ai_settings is None or not ai_settings.api_key:
+            await message.reply_text(
+                "Я могу распознавать голосовые, но сейчас не настроен AI-ключ. "
+                "Пожалуйста, отправьте это сообщение текстом."
+            )
+            return None
+        try:
+            voice_dir = Path("data/voice")
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            voice_file = await message.voice.get_file()
+            out_path = voice_dir / f"{update.effective_user.id}_{message.message_id}.ogg"
+            await voice_file.download_to_drive(custom_path=str(out_path))
+            transcript = transcribe_voice_note(ai_settings, out_path)
+            if not transcript:
+                await message.reply_text(
+                    "Не смог надежно распознать голосовое. Повторите, пожалуйста, текстом или другим голосовым."
+                )
+                return None
+            await message.reply_text(f"Распознал так: «{transcript}»")
+            return transcript.strip()
+        except Exception:
+            LOGGER.exception("Voice extraction failed")
+            await message.reply_text(
+                f"Не получилось обработать голосовое на шаге '{state_hint}'. Попробуйте текстом."
+            )
+            return None
+    return None
+
+
+def _validate_money_step(raw: str) -> Optional[float]:
+    try:
+        return parse_non_negative_money(raw)
+    except Exception:
+        return None
+
+
+def _build_llm_personalization(
+    context: ContextTypes.DEFAULT_TYPE,
+    profile: Any,
+) -> tuple[List[str], List[str]]:
+    payload = build_plan_payload(profile)
+    ai_settings = _get_ai_settings(context)
+    human = generate_human_recommendations(ai_settings, profile, payload.goals)
+    funds = suggest_funds_and_portfolio(ai_settings, profile, payload.goals)
+    return human, funds
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start or restart questionnaire."""
     context.user_data.clear()
     context.user_data["goals"] = []
     await update.message.reply_text(_message(context, "start_welcome"))
@@ -178,15 +264,68 @@ async def plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if profile is None:
         await update.message.reply_text(_message(context, "plan_no_data"))
         return
-    message = build_plan_message(profile)
+    human, funds = _build_llm_personalization(context, profile)
+    message = build_plan_message(
+        profile,
+        risk_reason=profile.risk_note,
+        human_recommendations=human,
+        fund_recommendations=funds,
+    )
     await update.message.reply_text(message, parse_mode=ParseMode.HTML)
 
 
-async def age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def pdf_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    storage: UserStorage = context.application.bot_data["storage"]
+    user_id = update.effective_user.id
+    profile = storage.get_profile(user_id)
+    if profile is None:
+        await update.message.reply_text(_message(context, "plan_no_data"))
+        return
+
+    payload = build_plan_payload(profile)
+    human, funds = _build_llm_personalization(context, profile)
+    reports_dir = Path("data/reports")
+    charts_dir = reports_dir / "charts"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pdf_path = reports_dir / f"finance_plan_{user_id}_{timestamp}.pdf"
+
     try:
-        age = parse_positive_int(update.message.text, min_value=18, max_value=100)
+        build_pdf_report(
+            profile=profile,
+            analysis=payload.analysis,
+            allocation=payload.allocation,
+            budget_hints=payload.budget_hints,
+            goal_strategies=payload.strategies,
+            human_recommendations=human,
+            fund_recommendations=funds,
+            output_pdf=pdf_path,
+            artifacts_dir=charts_dir,
+        )
+        with pdf_path.open("rb") as fh:
+            await update.message.reply_document(
+                document=fh,
+                filename=pdf_path.name,
+                caption=(
+                    "Готово! Отправил подробный PDF-отчет с графиками и персональными рекомендациями.\n"
+                    f"⚠️ {DISCLAIMER}"
+                ),
+            )
     except Exception:
-        await update.message.reply_text("Введите корректный возраст числом от 18 до 100.")
+        LOGGER.exception("PDF generation failed")
+        await update.message.reply_text(
+            "Не удалось собрать PDF-отчет. Попробуйте чуть позже или запросите /plan."
+        )
+
+
+async def age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = await _extract_user_text(update, context, "age")
+    if text is None:
+        return AGE
+    try:
+        age = parse_positive_int(text, min_value=18, max_value=100)
+    except Exception:
+        await update.message.reply_text("Введите возраст числом от 18 до 100.")
         return AGE
     context.user_data["age"] = age
     await update.message.reply_text(
@@ -197,18 +336,23 @@ async def age_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 
 async def family_status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = update.message.text.strip()
-    if not text:
-        await update.message.reply_text("Выберите семейный статус кнопкой.")
+    text = await _extract_user_text(update, context, "family_status")
+    if text is None:
         return FAMILY_STATUS
-    context.user_data["family_status"] = text
+    if len(text.strip()) < 2:
+        await update.message.reply_text("Выберите семейный статус кнопкой или напишите коротко (например: женат).")
+        return FAMILY_STATUS
+    context.user_data["family_status"] = text.strip()
     await update.message.reply_text("Сколько у вас иждивенцев? (число, можно 0)")
     return DEPENDENTS
 
 
 async def dependents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = await _extract_user_text(update, context, "dependents")
+    if text is None:
+        return DEPENDENTS
     try:
-        dependents = parse_positive_int(update.message.text, min_value=0, max_value=20)
+        dependents = parse_positive_int(text, min_value=0, max_value=20)
     except Exception:
         await update.message.reply_text("Введите число от 0 до 20.")
         return DEPENDENTS
@@ -217,16 +361,12 @@ async def dependents_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return MONTHLY_INCOME
 
 
-def _validate_money_step(raw: str) -> Optional[float]:
-    try:
-        return parse_non_negative_money(raw)
-    except Exception:
-        return None
-
-
 async def income_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
-    if value is None or value == 0:
+    text = await _extract_user_text(update, context, "monthly_income")
+    if text is None:
+        return MONTHLY_INCOME
+    value = _validate_money_step(text)
+    if value is None or value <= 0:
         await update.message.reply_text("Введите корректную сумму дохода больше 0.")
         return MONTHLY_INCOME
     context.user_data["monthly_income"] = value
@@ -235,7 +375,10 @@ async def income_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def expenses_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "monthly_expenses")
+    if text is None:
+        return MONTHLY_EXPENSES
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму расходов.")
         return MONTHLY_EXPENSES
@@ -245,7 +388,10 @@ async def expenses_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def current_savings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "current_savings")
+    if text is None:
+        return CURRENT_SAVINGS
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму сбережений.")
         return CURRENT_SAVINGS
@@ -255,7 +401,10 @@ async def current_savings_handler(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def asset_real_estate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "assets_real_estate")
+    if text is None:
+        return ASSET_REAL_ESTATE
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму недвижимости.")
         return ASSET_REAL_ESTATE
@@ -265,7 +414,10 @@ async def asset_real_estate_handler(update: Update, context: ContextTypes.DEFAUL
 
 
 async def asset_cars_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "assets_cars")
+    if text is None:
+        return ASSET_CARS
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму по автомобилям.")
         return ASSET_CARS
@@ -275,7 +427,10 @@ async def asset_cars_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def asset_securities_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "assets_securities")
+    if text is None:
+        return ASSET_SECURITIES
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму по ценным бумагам.")
         return ASSET_SECURITIES
@@ -285,7 +440,10 @@ async def asset_securities_handler(update: Update, context: ContextTypes.DEFAULT
 
 
 async def asset_crypto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "assets_crypto")
+    if text is None:
+        return ASSET_CRYPTO
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму по криптовалютам.")
         return ASSET_CRYPTO
@@ -295,7 +453,10 @@ async def asset_crypto_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def debt_mortgage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "debt_mortgage")
+    if text is None:
+        return DEBT_MORTGAGE
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму ипотеки.")
         return DEBT_MORTGAGE
@@ -305,7 +466,10 @@ async def debt_mortgage_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def debt_consumer_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "debt_consumer")
+    if text is None:
+        return DEBT_CONSUMER
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму потребительских кредитов.")
         return DEBT_CONSUMER
@@ -315,31 +479,29 @@ async def debt_consumer_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def debt_other_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "debt_other")
+    if text is None:
+        return DEBT_OTHER
+    value = _validate_money_step(text)
     if value is None:
         await update.message.reply_text("Введите корректную сумму прочих долгов.")
         return DEBT_OTHER
     context.user_data["debt_other"] = value
-    await update.message.reply_text(
-        "Какой у вас риск-профиль?",
-        reply_markup=_risk_profile_keyboard(),
-    )
-    return RISK_PROFILE
-
-
-async def risk_profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["risk_profile"] = _sanitize_risk(update.message.text)
     context.user_data["goals"] = []
     await update.message.reply_text(
-        "Добавим финансовые цели.\n"
-        f"Введите первую цель (например: {_message(context, 'goal_examples')}).",
+        "Теперь финансовые цели.\n"
+        f"Введите первую цель (например: {_message(context, 'goal_examples')}).\n"
+        "Можно голосом.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return GOAL_NAME
 
 
 async def goal_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    name = update.message.text.strip()
+    text = await _extract_user_text(update, context, "goal_name")
+    if text is None:
+        return GOAL_NAME
+    name = text.strip()
     if len(name) < 2:
         await update.message.reply_text("Название цели слишком короткое. Введите чуть подробнее.")
         return GOAL_NAME
@@ -349,7 +511,10 @@ async def goal_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def goal_target_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    value = _validate_money_step(update.message.text)
+    text = await _extract_user_text(update, context, "goal_target")
+    if text is None:
+        return GOAL_TARGET
+    value = _validate_money_step(text)
     if value is None or value == 0:
         await update.message.reply_text("Введите корректную сумму больше 0.")
         return GOAL_TARGET
@@ -359,8 +524,11 @@ async def goal_target_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def goal_horizon_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = await _extract_user_text(update, context, "goal_horizon")
+    if text is None:
+        return GOAL_HORIZON
     try:
-        horizon = parse_positive_int(update.message.text, min_value=1, max_value=50)
+        horizon = parse_positive_int(text, min_value=1, max_value=50)
     except Exception:
         await update.message.reply_text("Введите число от 1 до 50.")
         return GOAL_HORIZON
@@ -373,9 +541,11 @@ async def goal_horizon_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def goal_priority_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    priority_raw = update.message.text.strip().lower()
-    allowed = {"высокий", "средний", "низкий"}
-    if priority_raw not in allowed:
+    text = await _extract_user_text(update, context, "goal_priority")
+    if text is None:
+        return GOAL_PRIORITY
+    priority = _normalize_priority(text)
+    if priority is None:
         await update.message.reply_text("Выберите приоритет кнопкой: Высокий, Средний или Низкий.")
         return GOAL_PRIORITY
 
@@ -385,7 +555,7 @@ async def goal_priority_handler(update: Update, context: ContextTypes.DEFAULT_TY
             "name": context.user_data["current_goal_name"],
             "target_amount": context.user_data["current_goal_target"],
             "horizon_years": context.user_data["current_goal_horizon"],
-            "priority": priority_raw,
+            "priority": priority,
         }
     )
     await update.message.reply_text(
@@ -396,42 +566,81 @@ async def goal_priority_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def goal_add_more_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    decision = update.message.text.strip().lower()
-    if decision == "да":
+    text = await _extract_user_text(update, context, "goal_add_more")
+    if text is None:
+        return GOAL_ADD_MORE
+    decision = _normalize_yes_no(text)
+    if decision is True:
         await update.message.reply_text(
             "Введите название следующей цели.",
             reply_markup=ReplyKeyboardRemove(),
         )
         return GOAL_NAME
-    if decision != "нет":
-        await update.message.reply_text("Пожалуйста, выберите 'Да' или 'Нет'.", reply_markup=_yes_no_keyboard())
+    if decision is None:
+        await update.message.reply_text(
+            "Пожалуйста, выберите 'Да' или 'Нет'.",
+            reply_markup=_yes_no_keyboard(),
+        )
         return GOAL_ADD_MORE
 
     if not context.user_data.get("goals"):
         await update.message.reply_text("Нужно добавить хотя бы одну цель.")
         return GOAL_NAME
 
+    context.user_data["goals_json"] = json.dumps(
+        context.user_data["goals"],
+        ensure_ascii=False,
+    )
+    ai_settings = _get_ai_settings(context)
+    risk_profile, risk_reason = infer_risk_profile_with_reason(
+        ai_settings,
+        context.user_data,
+        context.user_data["goals"],
+    )
+    context.user_data["risk_profile"] = risk_profile
+    context.user_data["risk_note"] = risk_reason
+
     storage: UserStorage = context.application.bot_data["storage"]
     user_id = update.effective_user.id
-    context.user_data["goals_json"] = json.dumps(context.user_data["goals"], ensure_ascii=False)
     profile = storage.from_context(context.user_data, user_id)
     storage.save_profile(profile)
 
-    message = build_plan_message(profile)
+    human, funds = _build_llm_personalization(context, profile)
+    message = build_plan_message(
+        profile,
+        risk_reason=profile.risk_note,
+        human_recommendations=human,
+        fund_recommendations=funds,
+    )
     await update.message.reply_text(
-        "Отлично, данные сохранены! Ниже ваш план:",
+        "Отлично, готово! Вы молодец, что дошли до конца.\n"
+        "Я автоматически определил ваш риск-профиль и собрал персональный план 👇",
         reply_markup=ReplyKeyboardRemove(),
     )
     await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        "Если хотите красивый отчет с графиками — отправьте /pdf"
+    )
     return ConversationHandler.END
 
 
 async def unrelated_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (update.message.text or "").strip()
+    text = await _extract_user_text(update, context, "free_dialog")
+    if not text:
+        return
+
+    storage: UserStorage = context.application.bot_data["storage"]
+    profile = storage.get_profile(update.effective_user.id)
+    ai_settings = _get_ai_settings(context)
     if _is_finance_related(text):
+        ai_reply = generate_coach_reply(ai_settings, text, profile)
+        if ai_reply:
+            await update.message.reply_text(ai_reply)
+            return
         await update.message.reply_text(
             _message(context, "finance_redirect")
-            + "\nЕсли вопрос узкоспециальный, могу не знать точный ответ."
+            + "\nЕсли вопрос очень узкий, могу не знать точный ответ.\n"
+            f"⚠️ {DISCLAIMER}"
         )
         return
     await update.message.reply_text(_message(context, "unrelated_refusal"))
@@ -439,7 +648,7 @@ async def unrelated_message_handler(update: Update, context: ContextTypes.DEFAUL
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
-        "Диалог остановлен. Когда будете готовы продолжить — нажмите /start.",
+        "Остановил диалог. Когда будете готовы продолжить — нажмите /start.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
@@ -455,25 +664,24 @@ def register_handlers(application: Application) -> None:
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_handler)],
-            FAMILY_STATUS: [MessageHandler(filters.TEXT & ~filters.COMMAND, family_status_handler)],
-            DEPENDENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, dependents_handler)],
-            MONTHLY_INCOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, income_handler)],
-            MONTHLY_EXPENSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, expenses_handler)],
-            CURRENT_SAVINGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, current_savings_handler)],
-            ASSET_REAL_ESTATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, asset_real_estate_handler)],
-            ASSET_CARS: [MessageHandler(filters.TEXT & ~filters.COMMAND, asset_cars_handler)],
-            ASSET_SECURITIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, asset_securities_handler)],
-            ASSET_CRYPTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, asset_crypto_handler)],
-            DEBT_MORTGAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, debt_mortgage_handler)],
-            DEBT_CONSUMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, debt_consumer_handler)],
-            DEBT_OTHER: [MessageHandler(filters.TEXT & ~filters.COMMAND, debt_other_handler)],
-            RISK_PROFILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, risk_profile_handler)],
-            GOAL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, goal_name_handler)],
-            GOAL_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, goal_target_handler)],
-            GOAL_HORIZON: [MessageHandler(filters.TEXT & ~filters.COMMAND, goal_horizon_handler)],
-            GOAL_PRIORITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, goal_priority_handler)],
-            GOAL_ADD_MORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, goal_add_more_handler)],
+            AGE: [MessageHandler(USER_INPUT_FILTER, age_handler)],
+            FAMILY_STATUS: [MessageHandler(USER_INPUT_FILTER, family_status_handler)],
+            DEPENDENTS: [MessageHandler(USER_INPUT_FILTER, dependents_handler)],
+            MONTHLY_INCOME: [MessageHandler(USER_INPUT_FILTER, income_handler)],
+            MONTHLY_EXPENSES: [MessageHandler(USER_INPUT_FILTER, expenses_handler)],
+            CURRENT_SAVINGS: [MessageHandler(USER_INPUT_FILTER, current_savings_handler)],
+            ASSET_REAL_ESTATE: [MessageHandler(USER_INPUT_FILTER, asset_real_estate_handler)],
+            ASSET_CARS: [MessageHandler(USER_INPUT_FILTER, asset_cars_handler)],
+            ASSET_SECURITIES: [MessageHandler(USER_INPUT_FILTER, asset_securities_handler)],
+            ASSET_CRYPTO: [MessageHandler(USER_INPUT_FILTER, asset_crypto_handler)],
+            DEBT_MORTGAGE: [MessageHandler(USER_INPUT_FILTER, debt_mortgage_handler)],
+            DEBT_CONSUMER: [MessageHandler(USER_INPUT_FILTER, debt_consumer_handler)],
+            DEBT_OTHER: [MessageHandler(USER_INPUT_FILTER, debt_other_handler)],
+            GOAL_NAME: [MessageHandler(USER_INPUT_FILTER, goal_name_handler)],
+            GOAL_TARGET: [MessageHandler(USER_INPUT_FILTER, goal_target_handler)],
+            GOAL_HORIZON: [MessageHandler(USER_INPUT_FILTER, goal_horizon_handler)],
+            GOAL_PRIORITY: [MessageHandler(USER_INPUT_FILTER, goal_priority_handler)],
+            GOAL_ADD_MORE: [MessageHandler(USER_INPUT_FILTER, goal_add_more_handler)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         name="finance_conversation",
@@ -483,8 +691,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(conversation)
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("plan", plan))
+    application.add_handler(CommandHandler("pdf", pdf_report))
     application.add_handler(CommandHandler("reset", reset))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, unrelated_message_handler)
-    )
+    application.add_handler(MessageHandler(USER_INPUT_FILTER, unrelated_message_handler))
     application.add_error_handler(on_error)

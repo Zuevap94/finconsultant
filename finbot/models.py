@@ -23,6 +23,7 @@ class UserFinancialProfile:
     debt_consumer: float
     debt_other: float
     risk_profile: str
+    risk_note: str
     goals_json: str
 
     def total_assets(self) -> float:

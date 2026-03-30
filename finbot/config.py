@@ -19,6 +19,8 @@ class Settings:
     telegram_bot_token: str
     database_path: str
     config_path: str
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
     log_level: str = "INFO"
 
 
@@ -28,6 +30,8 @@ def load_settings() -> Settings:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     db_path = os.getenv("DATABASE_PATH", "data/finbot.sqlite3").strip()
     config_path = os.getenv("CONFIG_PATH", "config/messages.json").strip()
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
     log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
     if not token:
@@ -39,6 +43,8 @@ def load_settings() -> Settings:
         telegram_bot_token=token,
         database_path=db_path,
         config_path=config_path,
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
         log_level=log_level,
     )
 

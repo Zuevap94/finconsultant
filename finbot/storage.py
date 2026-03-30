@@ -42,10 +42,26 @@ class UserStorage:
                     debt_consumer REAL NOT NULL,
                     debt_other REAL NOT NULL,
                     risk_profile TEXT NOT NULL,
+                    risk_note TEXT NOT NULL DEFAULT '',
                     goals_json TEXT NOT NULL,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+            self._ensure_column(conn, "users", "risk_note", "TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if column_name not in existing:
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
             )
 
     def save_profile(self, profile: UserFinancialProfile) -> None:
@@ -56,9 +72,9 @@ class UserStorage:
                     user_id, age, family_status, dependents, monthly_income,
                     monthly_expenses, current_savings, assets_real_estate,
                     assets_cars, assets_securities, assets_crypto, debt_mortgage,
-                    debt_consumer, debt_other, risk_profile, goals_json, updated_at
+                    debt_consumer, debt_other, risk_profile, risk_note, goals_json, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_id) DO UPDATE SET
                     age=excluded.age,
                     family_status=excluded.family_status,
@@ -74,6 +90,7 @@ class UserStorage:
                     debt_consumer=excluded.debt_consumer,
                     debt_other=excluded.debt_other,
                     risk_profile=excluded.risk_profile,
+                    risk_note=excluded.risk_note,
                     goals_json=excluded.goals_json,
                     updated_at=CURRENT_TIMESTAMP
                 """,
@@ -93,6 +110,7 @@ class UserStorage:
                     profile.debt_consumer,
                     profile.debt_other,
                     profile.risk_profile,
+                    profile.risk_note,
                     profile.goals_json,
                 ),
             )
@@ -121,6 +139,7 @@ class UserStorage:
             debt_consumer=row["debt_consumer"],
             debt_other=row["debt_other"],
             risk_profile=row["risk_profile"],
+            risk_note=row["risk_note"],
             goals_json=row["goals_json"],
         )
 
@@ -155,5 +174,6 @@ class UserStorage:
             debt_consumer=float(context_data["debt_consumer"]),
             debt_other=float(context_data["debt_other"]),
             risk_profile=str(context_data["risk_profile"]),
+            risk_note=str(context_data.get("risk_note", "")),
             goals_json=str(context_data["goals_json"]),
         )

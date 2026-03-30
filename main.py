@@ -9,6 +9,7 @@ from telegram import BotCommand
 from telegram.ext import Application
 
 from finbot.config import load_messages, load_settings, setup_logging
+from finbot.ai import AISettings
 from finbot.handlers import register_handlers
 from finbot.storage import UserStorage
 
@@ -21,6 +22,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("start", "Начать сбор финансовых данных"),
         BotCommand("help", "Показать справку по боту"),
         BotCommand("plan", "Показать последний финансовый план"),
+        BotCommand("pdf", "Получить PDF-отчет с графиками"),
         BotCommand("reset", "Удалить мои сохраненные данные"),
     ]
     await application.bot.set_my_commands(commands)
@@ -41,6 +43,10 @@ def main() -> None:
     )
     application.bot_data["storage"] = storage
     application.bot_data["messages"] = messages
+    application.bot_data["ai_settings"] = AISettings(
+        api_key=settings.openai_api_key,
+        model=settings.openai_model,
+    )
 
     register_handlers(application)
     LOGGER.info("Finance bot started")
