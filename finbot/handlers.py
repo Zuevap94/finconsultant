@@ -410,7 +410,10 @@ async def family_status_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Выберите семейный статус кнопкой или напишите коротко (например: женат).")
         return FAMILY_STATUS
     context.user_data["family_status"] = text.strip()
-    await update.message.reply_text("Сколько у вас иждивенцев? (число, можно 0)")
+    await update.message.reply_text(
+        "Сколько у вас иждивенцев? (число, можно 0)",
+        reply_markup=_dependents_keyboard(),
+    )
     return DEPENDENTS
 
 
