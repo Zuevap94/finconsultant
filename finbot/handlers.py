@@ -43,7 +43,9 @@ DEFAULT_MESSAGES = {
     "start_welcome": (
         "Привет! Я ваш финансовый помощник 👋\n"
         "Я общаюсь простым языком, понимаю голосовые и соберу для вас персональный план.\n\n"
-        "Начнем с возраста. Напишите или наговорите число (например, 30)."
+        "Выберите формат:\n"
+        "• Быстрый план — сразу пройдем по цифрам\n"
+        "• Живая диагностика — как консультация, сначала разберем цели и ситуацию"
     ),
     "help_text": (
         "Команды:\n"
@@ -69,6 +71,8 @@ DEFAULT_MESSAGES = {
 }
 
 (
+    FLOW_MODE,
+    DIAGNOSTIC_QA,
     AGE,
     FAMILY_STATUS,
     DEPENDENTS,
@@ -87,7 +91,7 @@ DEFAULT_MESSAGES = {
     GOAL_HORIZON,
     GOAL_PRIORITY,
     GOAL_ADD_MORE,
-) = range(18)
+) = range(20)
 
 FINANCE_KEYWORDS = (
     "бюджет",
@@ -110,6 +114,79 @@ FINANCE_KEYWORDS = (
 
 USER_INPUT_FILTER = (filters.TEXT | filters.VOICE) & ~filters.COMMAND
 CUSTOM_INPUT_LABEL = "Ввести свое"
+FLOW_QUICK = "Быстрый план"
+FLOW_LIVE = "Живая диагностика"
+
+DIAGNOSTIC_QUESTIONS: List[Dict[str, Any]] = [
+    {
+        "block": "Блок 3. Постановка целей",
+        "key": "about",
+        "question": "Расскажи о себе: чем занимаешься, сколько тебе лет, где живешь?",
+    },
+    {
+        "block": "Блок 3. Постановка целей",
+        "key": "request",
+        "question": "Какой главный запрос от консультации? Что хочешь получить в итоге?",
+    },
+    {
+        "block": "Блок 3. Постановка целей",
+        "key": "goal_deadline",
+        "question": "Когда хочешь достичь цель?",
+        "options": ["До 1 года", "1-3 года", "3-7 лет", "7+ лет"],
+    },
+    {
+        "block": "Блок 3. Постановка целей",
+        "key": "goal_importance",
+        "question": "Насколько критично уложиться в срок, и что подтолкнуло поставить эту цель?",
+        "options": ["Очень критично", "Желательно", "Срок гибкий"],
+    },
+    {
+        "block": "Блок 3. Постановка целей",
+        "key": "failure_impact",
+        "question": "Если не получится вовремя — последствия приемлемы или нет?",
+        "options": ["Приемлемы", "Скорее не приемлемы", "Не приемлемы"],
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "income_growth",
+        "question": "Какой сейчас совокупный доход и есть ли реалистичный план роста дохода?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "workload_skills",
+        "question": "Сколько времени занимает работа и какие сильные навыки/компетенции у тебя есть помимо основной работы?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "expense_habits",
+        "question": "Как ведешь учет расходов? Есть ли обязательные платежи, которые нельзя убрать?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "safe_savings_capacity",
+        "question": "Если откладывать в супер-надежный инструмент на 15 лет, какую сумму в месяц тебе было бы комфортно откладывать?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "credit_details",
+        "question": "Какие кредиты сейчас есть: потребкредиты, ипотека, кредитки? Что по ставкам и платежам?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "assets_overview",
+        "question": "Какие уже есть активы: подушка, фондовый рынок, крипта, золото, страховки?",
+    },
+    {
+        "block": "Блок 4. Диагностика",
+        "key": "dependents_context",
+        "question": "Кто зависит от твоего дохода и как эти люди сейчас финансово защищены?",
+    },
+    {
+        "block": "Блок 5. Анализ попыток",
+        "key": "past_attempts",
+        "question": "Какие попытки уже были: больше зарабатывать, меньше тратить, инвестировать? Что сработало и что нет?",
+    },
+]
 
 
 def _message(context: ContextTypes.DEFAULT_TYPE, key: str) -> str:
@@ -195,6 +272,61 @@ def _goal_name_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def _mode_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(FLOW_QUICK), KeyboardButton(FLOW_LIVE)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _diagnostic_options_keyboard(options: List[str]) -> ReplyKeyboardMarkup:
+    keyboard: List[List[KeyboardButton]] = []
+    row: List[KeyboardButton] = []
+    for option in options:
+        row.append(KeyboardButton(option))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([KeyboardButton(CUSTOM_INPUT_LABEL)])
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _next_diagnostic_prompt(idx: int) -> tuple[str, Any]:
+    question = DIAGNOSTIC_QUESTIONS[idx]
+    header = ""
+    if idx == 0 or DIAGNOSTIC_QUESTIONS[idx - 1]["block"] != question["block"]:
+        header = f"\n<b>{question['block']}</b>\n"
+
+    text = (
+        f"{header}\n"
+        f"Вопрос {idx + 1}/{len(DIAGNOSTIC_QUESTIONS)}:\n"
+        f"{question['question']}"
+    )
+    options = question.get("options") or []
+    if options:
+        return text, _diagnostic_options_keyboard(options)
+    return text, ReplyKeyboardRemove()
+
+
+def _answer_to_label(raw_answer: str, question: Dict[str, Any]) -> str:
+    answer = raw_answer.strip()
+    options = [str(option).strip() for option in question.get("options", [])]
+    if not options:
+        return answer
+    lowered = answer.lower()
+    for option in options:
+        if lowered == option.lower():
+            return option
+    return answer
 
 
 def _is_finance_related(text: str) -> bool:
@@ -293,10 +425,83 @@ def _build_llm_personalization(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     context.user_data["goals"] = []
+    context.user_data["diagnostic_notes"] = []
     await update.message.reply_text(
-        _message(context, "start_welcome"),
-        reply_markup=_age_keyboard(),
+        "Выберите формат работы:\n"
+        "• Быстрый план — сразу к цифрам и расчетам\n"
+        "• Живая диагностика — как у консультанта: цели, диагностика, попытки, затем план",
+        reply_markup=_mode_keyboard(),
     )
+    return FLOW_MODE
+
+
+async def flow_mode_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = await _extract_user_text(update, context, "flow_mode")
+    if text is None:
+        return FLOW_MODE
+    normalized = text.strip().lower()
+    if FLOW_LIVE.lower() in normalized:
+        context.user_data["questionnaire_mode"] = "live"
+        context.user_data["diagnostic_notes"] = []
+        context.user_data["diagnostic_index"] = 0
+        prompt, markup = _next_diagnostic_prompt(0)
+        await update.message.reply_text(prompt, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return DIAGNOSTIC_QA
+    if FLOW_QUICK.lower() in normalized:
+        context.user_data["questionnaire_mode"] = "quick"
+        await update.message.reply_text(
+            _message(context, "start_welcome"),
+            reply_markup=_age_keyboard(),
+        )
+        return AGE
+    await update.message.reply_text(
+        "Нажмите один из вариантов: «Быстрый план» или «Живая диагностика».",
+        reply_markup=_mode_keyboard(),
+    )
+    return FLOW_MODE
+
+
+async def diagnostic_qa_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = await _extract_user_text(update, context, "diagnostic_qa")
+    if text is None:
+        return DIAGNOSTIC_QA
+    idx = int(context.user_data.get("diagnostic_index", 0))
+    if idx < 0 or idx >= len(DIAGNOSTIC_QUESTIONS):
+        idx = 0
+    question = DIAGNOSTIC_QUESTIONS[idx]
+
+    if _is_custom_input(text):
+        await update.message.reply_text(
+            "Напишите ответ свободно, как вам удобно.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return DIAGNOSTIC_QA
+
+    answer = _answer_to_label(text, question)
+    notes: List[Dict[str, Any]] = context.user_data.setdefault("diagnostic_notes", [])
+    notes.append(
+        {
+            "block": question["block"],
+            "key": question["key"],
+            "question": question["question"],
+            "answer": answer,
+        }
+    )
+    idx += 1
+    context.user_data["diagnostic_index"] = idx
+
+    if idx < len(DIAGNOSTIC_QUESTIONS):
+        prompt, markup = _next_diagnostic_prompt(idx)
+        await update.message.reply_text(prompt, parse_mode=ParseMode.HTML, reply_markup=markup)
+        return DIAGNOSTIC_QA
+
+    context.user_data["diagnostic_notes_json"] = json.dumps(notes, ensure_ascii=False)
+    await update.message.reply_text(
+        "Отлично, провели живую диагностику 💬\n"
+        "Теперь соберем финансовые цифры, чтобы рассчитать план.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await update.message.reply_text("Сколько вам лет?", reply_markup=_age_keyboard())
     return AGE
 
 
@@ -819,6 +1024,9 @@ async def goal_add_more_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("Нужно добавить хотя бы одну цель.")
         return GOAL_NAME
 
+    if "diagnostic_notes_json" not in context.user_data:
+        context.user_data["diagnostic_notes_json"] = "[]"
+
     context.user_data["goals_json"] = json.dumps(
         context.user_data["goals"],
         ensure_ascii=False,
@@ -896,6 +1104,8 @@ def register_handlers(application: Application) -> None:
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            FLOW_MODE: [MessageHandler(USER_INPUT_FILTER, flow_mode_handler)],
+            DIAGNOSTIC_QA: [MessageHandler(USER_INPUT_FILTER, diagnostic_qa_handler)],
             AGE: [MessageHandler(USER_INPUT_FILTER, age_handler)],
             FAMILY_STATUS: [MessageHandler(USER_INPUT_FILTER, family_status_handler)],
             DEPENDENTS: [MessageHandler(USER_INPUT_FILTER, dependents_handler)],

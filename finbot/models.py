@@ -25,6 +25,7 @@ class UserFinancialProfile:
     risk_profile: str
     risk_note: str
     goals_json: str
+    diagnostic_notes_json: str = "[]"
 
     def total_assets(self) -> float:
         return (

@@ -17,7 +17,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from finbot.finance import AnalysisResult, DISCLAIMER, parse_goals
+from finbot.finance import AnalysisResult, DISCLAIMER, parse_diagnostic_notes, parse_goals
 from finbot.models import Goal, UserFinancialProfile
 
 
@@ -91,6 +91,7 @@ def build_pdf_report(
     doc = SimpleDocTemplate(str(output_pdf), pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm)
     elements = []
     goals = parse_goals(profile.goals_json)
+    diagnostic_notes = parse_diagnostic_notes(profile.diagnostic_notes_json)
 
     elements.append(Paragraph("Персональный финансовый отчет", heading))
     elements.append(Paragraph(datetime.now().strftime("Дата формирования: %d.%m.%Y %H:%M"), normal))
@@ -121,6 +122,20 @@ def build_pdf_report(
     )
     elements.append(summary_table)
     elements.append(Spacer(1, 10))
+
+    if diagnostic_notes:
+        elements.append(Paragraph("Живая диагностика: контекст и мотивация", heading2))
+        grouped: Dict[str, List[Dict[str, str]]] = {}
+        for note in diagnostic_notes:
+            grouped.setdefault(note.get("block", "Контекст"), []).append(note)
+        for block_name, notes in grouped.items():
+            elements.append(Paragraph(f"<b>{block_name}</b>", normal))
+            for note in notes[:3]:
+                question = note.get("question", "")
+                answer = note.get("answer", "")
+                if question and answer:
+                    elements.append(Paragraph(f"• {question} → {answer}", normal))
+        elements.append(Spacer(1, 10))
 
     elements.append(Paragraph("Графики", heading2))
     elements.append(Image(str(cashflow_path), width=170 * mm, height=95 * mm))

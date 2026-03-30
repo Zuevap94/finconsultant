@@ -6,7 +6,7 @@ import html
 import json
 from dataclasses import dataclass
 from math import ceil
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from finbot.models import Goal, UserFinancialProfile
 
@@ -216,6 +216,28 @@ def _format_money(value: float) -> str:
     return f"{value:,.0f} ₽".replace(",", " ")
 
 
+def parse_diagnostic_notes(diagnostic_notes_json: str) -> List[Dict[str, Any]]:
+    try:
+        data = json.loads(diagnostic_notes_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "block": str(item.get("block", "")),
+                "key": str(item.get("key", "")),
+                "question": str(item.get("question", "")),
+                "answer": str(item.get("answer", "")),
+            }
+        )
+    return normalized
+
+
 def build_plan_payload(profile: UserFinancialProfile) -> PlanPayload:
     goals = parse_goals(profile.goals_json)
     analysis = analyze_profile(profile)
@@ -238,6 +260,7 @@ def build_plan_message(
     fund_recommendations: List[str] | None = None,
 ) -> str:
     payload = build_plan_payload(profile)
+    diagnostic_notes = parse_diagnostic_notes(profile.diagnostic_notes_json)
     goals = payload.goals
     analysis = payload.analysis
     allocation = payload.allocation
@@ -266,43 +289,58 @@ def build_plan_message(
         f"дефицит {_format_money(analysis.emergency_fund_gap)}"
     )
     lines.append("")
-    lines.append("<b>2) Рекомендации по бюджету</b>")
+    if diagnostic_notes:
+        lines.append("<b>2) Что я понял про ваш контекст и цели</b>")
+        by_block: Dict[str, List[Dict[str, Any]]] = {}
+        for note in diagnostic_notes:
+            by_block.setdefault(note["block"], []).append(note)
+        for block_name, notes in by_block.items():
+            if block_name:
+                lines.append(f"• <b>{html.escape(block_name)}</b>")
+            for note in notes[:3]:
+                question = html.escape(note.get("question", ""))
+                answer = html.escape(note.get("answer", ""))
+                if question and answer:
+                    lines.append(f"  - {question} → {answer}")
+        lines.append("")
+
+    lines.append("<b>3) Рекомендации по бюджету</b>")
     for hint in budget_hints:
         lines.append(f"• {hint}")
     lines.append("")
     if human_recommendations:
-        lines.append("<b>3) Живые персональные рекомендации</b>")
+        lines.append("<b>4) Живые персональные рекомендации</b>")
         for item in human_recommendations:
             if item.strip():
                 lines.append(f"• {html.escape(item)}")
         lines.append("")
     else:
-        lines.append("<b>3) Живые персональные рекомендации</b>")
+        lines.append("<b>4) Живые персональные рекомендации</b>")
         lines.append("• Двигайтесь маленькими шагами: финансовая дисциплина почти всегда важнее идеального портфеля.")
         lines.append("• Сделайте один автоперевод на накопления уже сегодня — даже небольшая сумма меняет траекторию.")
         lines.append("")
 
-    lines.append("<b>4) Пошаговый план накоплений</b>")
+    lines.append("<b>5) Пошаговый план накоплений</b>")
     lines.append("• Шаг 1: Сформируйте/доведите резервный фонд до целевого уровня.")
     lines.append("• Шаг 2: Погасите дорогие кредиты (если ставка выше доходности инвестиций).")
     lines.append("• Шаг 3: Настройте автоматическое инвестирование в день зарплаты.")
     lines.append("• Шаг 4: Пересматривайте план каждые 3-6 месяцев.")
     lines.append("")
     if fund_recommendations:
-        lines.append("<b>5) Идеи по фондам и портфелю (образовательный блок)</b>")
+        lines.append("<b>6) Идеи по фондам и портфелю (образовательный блок)</b>")
         for item in fund_recommendations:
             if item.strip():
                 lines.append(f"• {html.escape(item)}")
         lines.append("")
 
-    lines.append("<b>6) Распределение активов (ориентир)</b>")
+    lines.append("<b>7) Распределение активов (ориентир)</b>")
     lines.append("<pre>Класс активов              Доля")
     lines.append("--------------------------------")
     for asset_class, pct in allocation.items():
         lines.append(f"{asset_class:<25} {pct:>4.1f}%")
     lines.append("</pre>")
     lines.append("")
-    lines.append("<b>7) Временная шкала целей</b>")
+    lines.append("<b>8) Временная шкала целей</b>")
     for goal_name, summary in strategies:
         lines.append(f"• <b>{html.escape(goal_name)}</b>: {html.escape(summary)}")
     lines.append("")
